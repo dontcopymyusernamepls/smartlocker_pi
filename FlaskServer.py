@@ -19,12 +19,11 @@ def set_pin():
 def get_pin():
     return {'pin': shared_data['pin']}
 
-
 # ========== Locker Statistics API ==========
 @app.route('/locker-statistics', methods=['GET'])
 def locker_statistics():
     try:
-        file_path = '/home/pi/sensor_data.json'
+        file_path = '/home/smartlocker/stats/sensor_data.json'
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
                 data = json.load(f)
@@ -44,7 +43,6 @@ def locker_statistics():
             "status": "error",
             "message": str(e)
         }), 500
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
