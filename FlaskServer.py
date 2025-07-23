@@ -1,12 +1,9 @@
 from flask import Flask, request, jsonify
-import adafruit_dht
-import board
+import json
+import os
 
 app = Flask(__name__)
 shared_data = {'pin': '111111'}  # Default PIN
-
-# Initialize DHT11 sensor (GPIO 4 / D4)
-dht_device = adafruit_dht.DHT11(board.D4)
 
 # ========== PIN APIs ==========
 @app.route('/set-pin', methods=['POST'])
@@ -27,21 +24,21 @@ def get_pin():
 @app.route('/locker-statistics', methods=['GET'])
 def locker_statistics():
     try:
-        temperature = dht_device.temperature
-        humidity = dht_device.humidity
-
-        if temperature is not None and humidity is not None:
+        file_path = '/home/pi/sensor_data.json'
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                data = json.load(f)
             return jsonify({
                 "status": "success",
-                "temperature": temperature,
-                "humidity": humidity
+                "temperature": data.get("temperature"),
+                "humidity": data.get("humidity"),
+                "timestamp": data.get("timestamp")
             })
         else:
             return jsonify({
                 "status": "error",
-                "message": "Sensor reading not available"
-            }), 500
-
+                "message": "Sensor data file not found"
+            }), 404
     except Exception as e:
         return jsonify({
             "status": "error",
