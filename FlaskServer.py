@@ -3,9 +3,9 @@ import json
 import os
 
 app = Flask(__name__)
-shared_data = {'pin': '111111'}
-IR_STATUS_FILE = '/home/pi/shared/ir_status.json'
+shared_data = {'pin': '111111'}  # Default PIN
 
+# ========== PIN APIs ==========
 @app.route('/set-pin', methods=['POST'])
 def set_pin():
     data = request.get_json()
@@ -19,22 +19,30 @@ def set_pin():
 def get_pin():
     return {'pin': shared_data['pin']}
 
+# ========== Locker Statistics API ==========
 @app.route('/locker-statistics', methods=['GET'])
 def locker_statistics():
     try:
-        if not os.path.exists(IR_STATUS_FILE):
-            return jsonify({"status": "error", "message": "IR status not available"}), 500
-
-        with open(IR_STATUS_FILE, 'r') as f:
-            data = json.load(f)
-
-        locker_empty = data.get("locker_empty", "unknown")
-
-        return jsonify({
-            "Locker Empty?": "Yes" if locker_empty == "yes" else "No"
-        })
+        file_path = '/home/smartlocker/stats/sensor_data.json'
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+            return jsonify({
+                "status": "success",
+                "temperature": data.get("temperature"),
+                "humidity": data.get("humidity"),
+                "timestamp": data.get("timestamp")
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Sensor data file not found"
+            }), 404
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
