@@ -1,29 +1,28 @@
 import RPi.GPIO as GPIO
 import time
-import json
 
-IR_SENSOR_PIN = 23
-STATE_FILE = '/home/pi/shared/ir_status.json'
+ObstaclePin = 23  # GPIO pin number
 
 def setup():
     GPIO.setmode(GPIO.BCM)
-    GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-def write_status(state):
-    with open(STATE_FILE, 'w') as f:
-        json.dump({"locker_empty": state}, f)
+    GPIO.setup(ObstaclePin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 def loop():
-    last_state = None
+    last_state = None  # Track last state to avoid spamming output
+
     while True:
-        current_state = GPIO.input(IR_SENSOR_PIN)
-        if current_state == 0 and last_state != "no":
-            write_status("no")  # Parcel present
-            last_state = "no"
-        elif current_state == 1 and last_state != "yes":
-            write_status("yes")  # Locker empty
-            last_state = "yes"
-        time.sleep(0.5)
+        current_state = GPIO.input(ObstaclePin)
+        
+        if current_state == 0:  # Obstacle detected
+            if last_state != "present":
+                print("Parcel present")
+                last_state = "present"
+        else:  # No obstacle
+            if last_state != "absent":
+                print("Locker empty")
+                last_state = "absent"
+
+        time.sleep(0.5)  # Adjust polling rate as needed
 
 def destroy():
     GPIO.cleanup()
