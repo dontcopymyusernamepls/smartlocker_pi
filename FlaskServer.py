@@ -1,45 +1,40 @@
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 import json
 import os
 
 app = Flask(__name__)
+shared_data = {'pin': '111111'}
+IR_STATUS_FILE = '/home/pi/shared/ir_status.json'
 
-# File paths
-stats_file_path = "/home/smartlocker/stats/stats.json"
-ir_status_file_path = "/home/smartlocker/stats/ir_status.json"
+@app.route('/set-pin', methods=['POST'])
+def set_pin():
+    data = request.get_json()
+    new_pin = data.get('pin')
+    if new_pin and len(new_pin) == 6:
+        shared_data['pin'] = new_pin
+        return {'status': 'success', 'pin': new_pin}
+    return {'status': 'error', 'message': 'Invalid pin'}, 400
+
+@app.route('/get-pin', methods=['GET'])
+def get_pin():
+    return {'pin': shared_data['pin']}
 
 @app.route('/locker-statistics', methods=['GET'])
 def locker_statistics():
-    response = {"status": "success"}
-
-    # Load temp/humidity
     try:
-        if os.path.exists(stats_file_path):
-            with open(stats_file_path, 'r') as f:
-                stats = json.load(f)
-            response["temperature"] = stats.get("temperature")
-            response["humidity"] = stats.get("humidity")
-        else:
-            response["temperature"] = None
-            response["humidity"] = None
-    except Exception as e:
-        response["temperature"] = None
-        response["humidity"] = None
-        response["temp_humidity_error"] = str(e)
+        if not os.path.exists(IR_STATUS_FILE):
+            return jsonify({"status": "error", "message": "IR status not available"}), 500
 
-    # Load IR sensor presence
-    try:
-        if os.path.exists(ir_status_file_path):
-            with open(ir_status_file_path, 'r') as f:
-                ir_data = json.load(f)
-            response["parcel_present"] = ir_data.get("parcel_present", False)
-        else:
-            response["parcel_present"] = False
-    except Exception as e:
-        response["parcel_present"] = False
-        response["ir_sensor_error"] = str(e)
+        with open(IR_STATUS_FILE, 'r') as f:
+            data = json.load(f)
 
-    return jsonify(response)
+        locker_empty = data.get("locker_empty", "unknown")
+
+        return jsonify({
+            "Locker Empty?": "Yes" if locker_empty == "yes" else "No"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
