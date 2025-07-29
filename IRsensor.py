@@ -1,45 +1,42 @@
-import RPi.GPIO as GPIO
-import time
-import json
-
-IR_SENSOR_PIN = 23
-STATE_FILE = '/home/smartlocker/stats/ir_sensor.json'
-
-def setup():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-def write_status(state):
-    status_data = {"locker_empty": state}
-    
-    if state == "No":  # Parcel inserted
-        status_data["placed_at"] = datetime.datetime.now().isoformat()
-    elif state == "Yes":  # Parcel removed
-        status_data["placed_at"] = None
-
-    with open(STATE_FILE, 'w') as f:
-        json.dump(status_data, f)
-
-def loop():
+def ir_sensor_loop():
     last_state = None
     while True:
         current_state = GPIO.input(IR_SENSOR_PIN)
-        if current_state == 0 and last_state != "No":
-            write_status("No")  # Parcel present
-            print("Locker Full")
-            last_state = "No"
-        elif current_state == 1 and last_state != "Yes":
-            write_status("Yes")  # Locker empty
-            print("Locker Empty")
-            last_state = "Yes"
+        state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
+
+        # Load existing IR state data
+        ir_data = {}
+        if os.path.exists(IR_STATE_FILE):
+            with open(IR_STATE_FILE, 'r') as f:
+                try:
+                    ir_data = json.load(f)
+                except Exception:
+                    ir_data = {}
+
+        if state_str != last_state:
+            # Save new state
+            ir_data["locker_empty"] = state_str
+
+            # Set or clear placed_at timestamp
+            if state_str == "No":  # Locker just became full
+                ir_data["placed_at"] = datetime.datetime.now().isoformat()
+            elif state_str == "Yes":
+                ir_data["placed_at"] = None
+
+            # Write updated state
+            with open(IR_STATE_FILE, 'w') as f:
+                json.dump(ir_data, f)
+
+            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
+            last_state = state_str
+
+        # Check if parcel has been in locker for >3 days
+        if ir_data.get("locker_empty") == "No" and ir_data.get("placed_at"):
+            try:
+                placed_time = datetime.datetime.fromisoformat(ir_data["placed_at"])
+                if (datetime.datetime.now() - placed_time).days > 3:
+                    print("[ALERT] Parcel has been in locker for more than 3 days.")
+            except Exception:
+                pass
+
         time.sleep(0.5)
-
-def destroy():
-    GPIO.cleanup()
-
-if __name__ == '__main__':
-    setup()
-    try:
-        loop()
-    except KeyboardInterrupt:
-        destroy()
