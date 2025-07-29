@@ -1,81 +1,44 @@
-from flask import Flask, request, jsonify
-import json
-import os
-import paho.mqtt.client as mqtt
-from datetime import datetime, timedelta  # <-- imported for date checking
-
-app = Flask(__name__)
-shared_data = {'pin': '111111'}  # Default PIN
-
-# ========== PIN APIs ==========
-@app.route('/set-pin', methods=['POST'])
-def set_pin():
-    data = request.get_json()
-    new_pin = data.get('pin')
-    if new_pin and len(new_pin) == 6:
-        shared_data['pin'] = new_pin
-        return {'status': 'success', 'pin': new_pin}
-    return {'status': 'error', 'message': 'Invalid pin'}, 400
-
-@app.route('/get-pin', methods=['GET'])
-def get_pin():
-    return {'pin': shared_data['pin']}
-
-# ========== Locker Statistics API ==========
-@app.route('/locker-statistics', methods=['GET'])
-def locker_statistics():
-    try:
-        # Read main sensor data
-        file_path = '/home/smartlocker/stats/sensor_data.json'
-        if not os.path.exists(file_path):
-            return jsonify({
-                "status": "error",
-                "message": "Sensor data file not found"
-            }), 404
-
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-
-        # Read IR sensor data
-        ir_file_path = '/home/smartlocker/stats/ir_sensor.json'
-        locker_empty = "-"
-        placed_at_str = None
-        message = None
-
-        if os.path.exists(ir_file_path):
-            with open(ir_file_path, 'r') as f_ir:
-                ir_data = json.load(f_ir)
-            locker_empty = ir_data.get("locker_empty", "-")
-            placed_at_str = ir_data.get("placed_at")
-
-        # Check for parcel delay (3 days or 30 sec for testing)
-        if locker_empty == "No" and placed_at_str:
+def ir_sensor_loop():
+    global parcel_present_since
+    last_state = None
+    while True:
+        current_state = GPIO.input(IR_SENSOR_PIN)
+        state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
+        
+        # Track when parcel was first detected
+        if state_str == "No" and parcel_present_since is None:
+            parcel_present_since = time.time()
+            print(f"[IR] Parcel detected at {parcel_present_since}")
+        elif state_str == "Yes":
+            parcel_present_since = None
+        
+        # Check if parcel has been there too long
+        if (parcel_present_since is not None and 
+            (time.time() - parcel_present_since) > ALERT_THRESHOLD):
+            print("[ALERT] Parcel has been in locker too long!")
+            
+            # Send HTTP request to your Flutter app
             try:
-                placed_time = datetime.fromisoformat(placed_at_str)
-                if (datetime.now() - placed_time) > timedelta(seconds=30):  # ← change to days=3 in production
-                    message = "Parcel not collected for 3 days"
+                requests.post(
+                    "http://<YOUR_PHONE_IP>:<PORT>/alert",
+                    json={
+                        "message": "Parcel has been in locker for over 3 days",
+                        "timestamp": time.time()
+                    },
+                    timeout=2
+                )
             except Exception as e:
-                print(f"[!] Timestamp parsing error: {e}")
-
-        # Build response
-        response = {
-            "status": "success",
-            "temperature": data.get("temperature"),
-            "humidity": data.get("humidity"),
-            "timestamp": data.get("timestamp"),
-            "locker_empty": locker_empty
-        }
-
-        if message:
-            response["message"] = message
-
-        return jsonify(response)
-
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+                print(f"Failed to send alert to phone: {e}")
+            
+            # Reset timer to avoid spamming alerts
+            parcel_present_since = time.time() - (ALERT_THRESHOLD - 10)  # Give 10 sec buffer
+            
+        if state_str != last_state:
+            with open(IR_STATE_FILE, 'w') as f:
+                json.dump({
+                    "locker_empty": state_str,
+                    "parcel_present_since": parcel_present_since
+                }, f)
+            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
+            last_state = state_str
+        time.sleep(0.5)
