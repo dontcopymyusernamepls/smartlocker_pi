@@ -15,3 +15,7 @@ def receive_alert():
 @app.route('/door-status', methods=['GET'])
 def get_door_status():
     return jsonify({"door_alert": door_alert}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
