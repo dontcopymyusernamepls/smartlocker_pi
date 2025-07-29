@@ -1,42 +1,12 @@
-def ir_sensor_loop():
-    last_state = None
-    while True:
-        current_state = GPIO.input(IR_SENSOR_PIN)
-        state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
+        # Include message if parcel has not been collected after threshold
+        if locker_empty == "No" and placed_at_str:
+            placed_time = datetime.fromisoformat(placed_at_str)
+            duration = datetime.now() - placed_time
 
-        # Load existing IR state data
-        ir_data = {}
-        if os.path.exists(IR_STATE_FILE):
-            with open(IR_STATE_FILE, 'r') as f:
-                try:
-                    ir_data = json.load(f)
-                except Exception:
-                    ir_data = {}
+            # Change this to timedelta(days=3) for real deployment
+            threshold = timedelta(seconds=30)
 
-        if state_str != last_state:
-            # Save new state
-            ir_data["locker_empty"] = state_str
+            if duration > threshold:
+                response["message"] = "Parcel not collected for 3 days"
 
-            # Set or clear placed_at timestamp
-            if state_str == "No":  # Locker just became full
-                ir_data["placed_at"] = datetime.datetime.now().isoformat()
-            elif state_str == "Yes":
-                ir_data["placed_at"] = None
-
-            # Write updated state
-            with open(IR_STATE_FILE, 'w') as f:
-                json.dump(ir_data, f)
-
-            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
-            last_state = state_str
-
-        # Check if parcel has been in locker for >3 days
-        if ir_data.get("locker_empty") == "No" and ir_data.get("placed_at"):
-            try:
-                placed_time = datetime.datetime.fromisoformat(ir_data["placed_at"])
-                if (datetime.datetime.now() - placed_time).total_seconds() > 30:
-                    print("[ALERT] Parcel has been in locker for more than 3 days.")
-            except Exception:
-                pass
-
-        time.sleep(0.5)
+        return jsonify(response)
