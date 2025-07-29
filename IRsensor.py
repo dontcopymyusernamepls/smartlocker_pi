@@ -1,37 +1,39 @@
-# Add at the top of your main.py
-ALERT_THRESHOLD = 30  # 30 seconds for testing (change to 259200 for 3 days in production)
-parcel_present_since = None
+@app.route('/locker-statistics', methods=['GET'])
+def locker_statistics():
+    try:
+        # Read main sensor data
+        sensor_file = '/home/smartlocker/stats/sensor_data.json'
+        ir_file = '/home/smartlocker/stats/ir_sensor.json'
+        
+        # Initialize response with default values
+        response = {
+            "status": "success",
+            "temperature": None,
+            "humidity": None,
+            "timestamp": time.time(),
+            "locker_empty": None,
+            "message": None
+        }
 
-def ir_sensor_loop():
-    global parcel_present_since
-    last_state = None
-    while True:
-        current_state = GPIO.input(IR_SENSOR_PIN)
-        state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
-        
-        # Track parcel presence
-        if state_str == "No" and parcel_present_since is None:
-            parcel_present_since = time.time()
-            print(f"[IR] Parcel detected at {parcel_present_since}")
-        elif state_str == "Yes":
-            parcel_present_since = None
-        
-        # Check if parcel has been there too long
-        message = None
-        if (parcel_present_since is not None and 
-            (time.time() - parcel_present_since) > ALERT_THRESHOLD):
-            message = "Parcel has been in locker for over 3 days"
-            print(f"[ALERT] {message}")
-        
-        # Save data including message
-        if state_str != last_state or message is not None:
-            data = {
-                "locker_empty": state_str,
-                "message": message if message else ""
-            }
-            with open(IR_STATE_FILE, 'w') as f:
-                json.dump(data, f)
-            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
-            last_state = state_str
-        
-        time.sleep(0.5)
+        # Read temperature/humidity if available
+        if os.path.exists(sensor_file):
+            with open(sensor_file, 'r') as f:
+                sensor_data = json.load(f)
+            response.update({
+                "temperature": sensor_data.get("temperature"),
+                "humidity": sensor_data.get("humidity")
+            })
+
+        # Read IR sensor data if available
+        if os.path.exists(ir_file):
+            with open(ir_file, 'r') as f:
+                ir_data = json.load(f)
+            response.update({
+                "locker_empty": ir_data.get("locker_empty"),
+                "message": ir_data.get("message", "")
+            })
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
