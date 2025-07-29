@@ -11,6 +11,8 @@ import I2C_LCD_driver
 from time import sleep
 import paho.mqtt as mqtt
 import paho.mqtt.publish as publish
+import tempfile
+import shutil
 
 # ===========================================================
 # ========== GLOBAL CONFIGURATION ===========================
@@ -51,8 +53,12 @@ GPIO.setup(Relay, GPIO.OUT)
 GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.output(Relay, GPIO.HIGH)
 
-# =================== MQTT CONFIGS ==========================
-
+# =================== SAFE WRITING CONFIGS ==========================
+def safe_write_json(data, path):
+	with tempfile.NamedTemporaryFile('w', delete=False) as tmp:
+		json.dump(data, tmp)
+		temp_path = tmp.name
+	shutil.move(temp_path, path)
 
 # ===========================================================
 # ========== FLASK SERVER ===================================
@@ -88,13 +94,15 @@ def locker_statistics():
             with open(IR_STATE_FILE, 'r') as f_ir:
                 ir_data = json.load(f_ir)
             locker_empty = ir_data.get("locker_empty", "-")
+            message = ir_data.get("message", None)
 
         return jsonify({
             "status": "success",
             "temperature": sensor_data.get("temperature"),
             "humidity": sensor_data.get("humidity"),
             "timestamp": sensor_data.get("timestamp"),
-            "locker_empty": locker_empty
+            "locker_empty": locker_empty,
+            "message": message
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -102,16 +110,41 @@ def locker_statistics():
 # ===========================================================
 # ========== IR SENSOR THREAD ===============================
 # ===========================================================
+
+ALERT_THRESHOLD = 30  # 30 seconds for testing (change to 259200 for 3 days in production)
+parcel_present_since = None
+
 def ir_sensor_loop():
+    global parcel_present_since
     last_state = None
     while True:
         current_state = GPIO.input(IR_SENSOR_PIN)
-        state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
-        if state_str != last_state:
-            with open(IR_STATE_FILE, 'w') as f:
-                json.dump({"locker_empty": state_str}, f)
-            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
-            last_state = state_str
+        state_str = "No" if current_state == 0 else "Yes"
+        
+        # Track parcel presence
+        if state_str == "No" and parcel_present_since is None:
+            parcel_present_since = time.time()
+        elif state_str == "Yes":
+            parcel_present_since = None
+        
+        # Check if parcel has been there too long
+        message = None
+        if (parcel_present_since is not None and 
+            (time.time() - parcel_present_since) > ALERT_THRESHOLD):
+            message = "Parcel has not been collected for over 3 days"
+            print(f"[ALERT] {message}")
+        
+        # Always write both fields
+        data = {
+            "locker_empty": state_str,
+            "message": message if message else None  # Explicit None instead of empty string
+        }
+        print(f"[DEBUG] Writing IR Data: {data}")
+        
+        safe_write_json(data, IR_STATE_FILE)
+           
+        
+        last_state = state_str
         time.sleep(0.5)
 
 # ===========================================================
@@ -128,8 +161,8 @@ def dht_sensor_loop():
                     "humidity": humidity,
                     "timestamp": time.time()
                 }
-                with open(SENSOR_DATA_FILE, 'w') as f:
-                    json.dump(data, f)
+                safe_write_json(data, SENSOR_DATA_FILE)
+                  
                 print(f"[DHT] Temp={temperature:.1f}C Humidity={humidity:.1f}%")
         except Exception as e:
             print("[DHT] Reading failed:", e)
