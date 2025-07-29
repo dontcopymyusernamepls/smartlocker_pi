@@ -9,6 +9,8 @@ import requests
 from flask import Flask, request, jsonify
 import I2C_LCD_driver
 from time import sleep
+import paho.mqtt as mqtt
+import paho.mqtt.publish as publish
 
 # ===========================================================
 # ========== GLOBAL CONFIGURATION ===========================
@@ -48,6 +50,9 @@ GPIO.setup(buzzer, GPIO.OUT)
 GPIO.setup(Relay, GPIO.OUT)
 GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.output(Relay, GPIO.HIGH)
+
+# =================== MQTT CONFIGS ==========================
+
 
 # ===========================================================
 # ========== FLASK SERVER ===================================
@@ -175,6 +180,10 @@ def commands():
             GPIO.output(buzzer, GPIO.LOW)
             sleep(1)
             GPIO.output(Relay, GPIO.HIGH)
+            publish.single("locker/unlock", payload="unlock", hostname="10.189.197.148")
+            print("[MQTT] Unlock signal sent to Door_Pi")
+
+				
         else:
             failed_attempts += 1
             lcd.lcd_clear()
