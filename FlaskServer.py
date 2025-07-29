@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import json
 import os
+import datetime
 import paho.mqtt.client as mqtt
 
 app = Flask(__name__)
@@ -24,43 +25,56 @@ def get_pin():
 @app.route('/locker-statistics', methods=['GET'])
 def locker_statistics():
     try:
-        # Read main sensor data (temperature, humidity, timestamp)
-        file_path = '/home/smartlocker/stats/sensor_data.json'
-        if not os.path.exists(file_path):
-            return jsonify({
-                "status": "error",
-                "message": "Sensor data file not found"
-            }), 404
-
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-
-        # Read IR sensor data (locker empty yes/no)
-        ir_file_path = '/home/smartlocker/stats/ir_sensor.json'
-        locker_empty = None
-        if os.path.exists(ir_file_path):
-            with open(ir_file_path, 'r') as f_ir:
-                ir_data = json.load(f_ir)
-            locker_empty = ir_data.get("locker_empty")
-        
-        # Build response including locker_empty if found
+        # Initialize response with default values
         response = {
             "status": "success",
-            "temperature": data.get("temperature"),
-            "humidity": data.get("humidity"),
-            "timestamp": data.get("timestamp")
+            "temperature": None,
+            "humidity": None,
+            "timestamp": time.time(),
+            "locker_empty": None,
+            "message": ""  # Always include message field
         }
-        
-        if locker_empty is not None:
-            response["locker_empty"] = locker_empty
 
-        return jsonify(response)
+        # Read sensor data
+        sensor_file = '/home/smartlocker/stats/sensor_data.json'
+        if os.path.exists(sensor_file) and os.path.getsize(sensor_file) > 0:
+            with open(sensor_file, 'r') as f:
+                try:
+                    sensor_data = json.load(f)
+                    response.update({
+                        "temperature": sensor_data.get("temperature"),
+                        "humidity": sensor_data.get("humidity"),
+                        "timestamp": sensor_data.get("timestamp", time.time())
+                    })
+                except json.JSONDecodeError:
+                    print("[Flask] sensor_data.json is invalid.")
+                    response["message"] = "Error reading sensor data."
 
+        # Read IR sensor data
+        ir_file = '/home/smartlocker/stats/ir_sensor.json'
+        if os.path.exists(ir_file) and os.path.getsize(ir_file) > 0:
+            with open(ir_file, 'r') as f:
+                try:
+                    ir_data = json.load(f)
+                    response["locker_empty"] = ir_data.get("locker_empty", "")
+                    response["message"] = ir_data.get("message", "")
+                except json.JSONDecodeError:
+                    print("[Flask] ir_sensor.json is invalid JSON.")
+                    response["message"] = "Error reading IR sensor data."
+        else:
+            print("[Flask] ir_sensor.json is missing or empty.")
+            response["message"] = "No IR sensor data found."
+
+        # Final log
+        print("[Flask] Final response:", response)
+
+        return make_response(json.dumps(response), 200, {'Content-Type': 'application/json'})
     except Exception as e:
         return jsonify({
             "status": "error",
             "message": str(e)
         }), 500
-
+        
+# ========== Main ==========
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
