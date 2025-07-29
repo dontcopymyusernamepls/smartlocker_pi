@@ -107,35 +107,12 @@ def ir_sensor_loop():
     while True:
         current_state = GPIO.input(IR_SENSOR_PIN)
         state_str = "No" if current_state == 0 else "Yes"  # No=full, Yes=empty
-
-        # Load existing IR state data (to preserve 'placed_at' when needed)
-        ir_data = {}
-        if os.path.exists(IR_STATE_FILE):
-            with open(IR_STATE_FILE, 'r') as f:
-                try:
-                    ir_data = json.load(f)
-                except Exception:
-                    ir_data = {}
-
         if state_str != last_state:
-            # Update locker_empty state
-            ir_data["locker_empty"] = state_str
-
-            # Update placed_at only when locker becomes full ("No")
-            if state_str == "No" and (ir_data.get("placed_at") is None):
-                ir_data["placed_at"] = datetime.datetime.now().isoformat()
-            elif state_str == "Yes":
-                ir_data["placed_at"] = None
-
-            # Write updated data back to file
             with open(IR_STATE_FILE, 'w') as f:
-                json.dump(ir_data, f)
-
-            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}, placed_at: {ir_data.get('placed_at')}")
+                json.dump({"locker_empty": state_str}, f)
+            print(f"[IR] Locker {('Full' if state_str=='No' else 'Empty')}")
             last_state = state_str
-
         time.sleep(0.5)
-
 
 # ===========================================================
 # ========== DHT SENSOR THREAD ==============================
