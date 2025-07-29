@@ -41,9 +41,9 @@ try:
 			try:
 				response = requests.post(
 					'http://10.189.197.148:5000/door-alert',
-					json={"alert": "Locker door has been closed too long", "timestamp": time()}
+					json={"alert": "Parcel has not been collected for more than 3 days.", "timestamp": time()}
 		        )
-				print("Alert sent to Flutter backend:", response.status_code)
+				print("Alert sent to admin dashboard:", response.status_code)
 			except Exception as e:
 				print("Failed to send alert:", e)
 			break
