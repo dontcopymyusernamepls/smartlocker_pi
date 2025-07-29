@@ -1,31 +1,60 @@
-def ir_sensor_loop():
-    global parcel_present_since
-    last_state = None
-    while True:
-        current_state = GPIO.input(IR_SENSOR_PIN)
-        state_str = "No" if current_state == 0 else "Yes"
-        
-        # Track parcel presence
-        if state_str == "No" and parcel_present_since is None:
-            parcel_present_since = time.time()
-        elif state_str == "Yes":
-            parcel_present_since = None
-        
-        # Check if parcel has been there too long
-        message = None
-        if (parcel_present_since is not None and 
-            (time.time() - parcel_present_since) > ALERT_THRESHOLD):
-            message = "Parcel has been in locker for over 3 days"
-            print(f"[ALERT] {message}")
-        
-        # Always write both fields
-        data = {
-            "locker_empty": state_str,
-            "message": message if message else None  # Explicit None instead of empty string
+from flask import Flask, request, jsonify
+import os
+import json
+import time
+
+app = Flask(__name__)
+
+@app.route('/locker-statistics', methods=['GET'])
+def locker_statistics():
+    try:
+        # Initialize response with default values
+        response = {
+            "status": "success",
+            "temperature": None,
+            "humidity": None,
+            "timestamp": time.time(),
+            "locker_empty": None,
+            "message": ""  # Always include message field
         }
-        
-        with open(IR_STATE_FILE, 'w') as f:
-            json.dump(data, f)
-        
-        last_state = state_str
-        time.sleep(0.5)
+
+        # Read sensor data
+        sensor_file = '/home/smartlocker/stats/sensor_data.json'
+        if os.path.exists(sensor_file) and os.path.getsize(sensor_file) > 0:
+            with open(sensor_file, 'r') as f:
+                try:
+                    sensor_data = json.load(f)
+                    response.update({
+                        "temperature": sensor_data.get("temperature"),
+                        "humidity": sensor_data.get("humidity"),
+                        "timestamp": sensor_data.get("timestamp", time.time())
+                    })
+                except json.JSONDecodeError:
+                    print("[Flask] sensor_data.json is invalid.")
+                    response["message"] = "Error reading sensor data."
+
+        # Read IR sensor data
+        ir_file = '/home/smartlocker/stats/ir_sensor.json'
+        if os.path.exists(ir_file) and os.path.getsize(ir_file) > 0:
+            with open(ir_file, 'r') as f:
+                try:
+                    ir_data = json.load(f)
+                    response["locker_empty"] = ir_data.get("locker_empty", "")
+                    response["message"] = ir_data.get("message", "")
+                except json.JSONDecodeError:
+                    print("[Flask] ir_sensor.json is invalid JSON.")
+                    response["message"] = "Error reading IR sensor data."
+        else:
+            print("[Flask] ir_sensor.json is missing or empty.")
+            response["message"] = "No IR sensor data found."
+
+        # Final log
+        print("[Flask] Final response:", response)
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
