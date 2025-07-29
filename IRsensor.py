@@ -10,8 +10,15 @@ def setup():
     GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 def write_status(state):
+    status_data = {"locker_empty": state}
+    
+    if state == "No":  # Parcel inserted
+        status_data["placed_at"] = datetime.datetime.now().isoformat()
+    elif state == "Yes":  # Parcel removed
+        status_data["placed_at"] = None
+
     with open(STATE_FILE, 'w') as f:
-        json.dump({"locker_empty": state}, f)
+        json.dump(status_data, f)
 
 def loop():
     last_state = None
