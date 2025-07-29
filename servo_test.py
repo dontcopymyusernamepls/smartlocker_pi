@@ -1,6 +1,8 @@
 from gpiozero import Servo
 from gpiozero.pins.pigpio import PiGPIOFactory
 from time import sleep, time
+import requests
+		
 
 # Setup sevo on GPIO17 using pigpio
 factory =  PiGPIOFactory()
@@ -36,7 +38,15 @@ try:
 		elapsed = time() - start_time
 		if elapsed > MAX_DOOR_CLOSE_TIME:
 			print("ALERT: Door has remained closed too long!")
-			break
+		    try:
+		        response = requests.post(
+		            'http://10.189.197.148:5000/door-alert',
+		            json={"alert": "Locker door has been closed too long", "timestamp": time()}
+		        )
+		        print("Alert sent to Flutter backend:", response.status_code)
+		    except Exception as e:
+		        print("Failed to send alert:", e)
+		    break
 		sleep
 
 except Exception as e:
