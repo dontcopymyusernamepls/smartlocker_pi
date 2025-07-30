@@ -3,7 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:async';
 
+
+Timer? _reconnectTimer;
+int _reconnectAttempts = 0;
+const int _maxReconnectAttempts = 5;
+const Duration _reconnectDelay = Duration(seconds: 3);
 
 void main() {
   runApp(const SmartPickApp());
@@ -32,18 +39,190 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     },
   ];
 
+  // Sensor data
   double? temperature;
   double? humidity;
-  bool isLoading = false;
+  bool? isLockerEmpty;
+  String? parcelOverdueMessage;
   String? errorMessage;
   String? lockerEmptyStatus;
-  String? parcelOverdueMessage;
 
+  // Connection state
+  bool isLoading = true;
+  bool alertShown = false;
+  String? connectionError;
+  late WebSocketChannel _channel;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  static const _maxReconnectAttempts = 5;
+  static const _reconnectDelay = Duration(seconds: 3);
 
   @override
   void initState() {
     super.initState();
-    fetchLockerStats();
+    _connectWebSocket();
+  }
+
+  @override
+  void dispose() {
+    _channel.sink.close();
+    _reconnectTimer?.cancel();
+    super.dispose();
+  }
+
+  void _connectWebSocket() {
+    setState(() {
+      isLoading = true;
+      connectionError = null;
+    });
+
+    try {
+      _channel = WebSocketChannel.connect(Uri.parse('ws://10.189.197.163:8765'));
+
+      _channel.stream.listen(
+        _handleWebSocketMessage,
+        onError: _handleWebSocketError,
+        onDone: _handleWebSocketDisconnect,
+      );
+    } catch (e) {
+      _handleConnectionError(e);
+    }
+  }
+
+  void _handleWebSocketMessage(dynamic message) {
+    try {
+      final data = jsonDecode(message);
+      print('Received WebSocket data: $data'); // Debug log
+
+      setState(() {
+        // Handle temperature/humidity data
+        if (data['temperature'] != null) {
+          temperature = data['temperature']?.toDouble();
+          humidity = data['humidity']?.toDouble();
+          print('Updated temperature: $temperature, humidity: $humidity');
+        }
+
+        // Handle IR sensor data
+        if (data['locker_empty'] != null) {
+          lockerEmptyStatus = data['locker_empty'].toString();
+          isLockerEmpty = lockerEmptyStatus == "Yes";
+
+          // Reset alertShown when locker becomes empty
+          if (isLockerEmpty!) {
+            alertShown = false;
+          }
+
+          // Handle parcel overdue message
+          if (data['message'] != null) {
+            parcelOverdueMessage = data['message'].toString();
+
+            if (parcelOverdueMessage!.isNotEmpty && !isLockerEmpty! && !alertShown) {
+              _showAlertMessage(parcelOverdueMessage!);
+              alertShown = true;
+            }
+          } else {
+            parcelOverdueMessage = null;
+          }
+
+          print('Updated locker status: $lockerEmptyStatus, message: $parcelOverdueMessage');
+        }
+
+        isLoading = false;
+      });
+    } catch (e) {
+      print('Error parsing WebSocket message: $e');
+      setState(() {
+        errorMessage = 'Data parsing error: $e';
+        isLoading = false;
+      });
+    }
+  }
+
+
+  void _showAlertMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _handleWebSocketError(error) {
+    setState(() {
+      connectionError = 'Connection error: $error';
+      isLoading = false;
+    });
+    _scheduleReconnect();
+  }
+
+  void _handleWebSocketDisconnect() {
+    setState(() {
+      connectionError = 'Connection lost. Reconnecting...';
+      isLoading = false;
+    });
+    _scheduleReconnect();
+  }
+
+  void _handleConnectionError(e) {
+    setState(() {
+      connectionError = 'Failed to connect: $e';
+      isLoading = false;
+    });
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    if (_reconnectAttempts < _maxReconnectAttempts) {
+      _reconnectTimer = Timer(_reconnectDelay, () {
+        _reconnectAttempts++;
+        _connectWebSocket();
+      });
+    } else {
+      setState(() {
+        connectionError = 'Max reconnect attempts reached';
+      });
+    }
+  }
+
+  Widget _buildLockerStatusIndicator() {
+    if (isLockerEmpty == null) return const Text('Status: Unknown');
+
+    return Row(
+      children: [
+        Icon(
+          isLockerEmpty! ? Icons.check_circle : Icons.error,
+          color: isLockerEmpty! ? Colors.green : Colors.orange,
+        ),
+        const SizedBox(width: 8),
+        Text(
+          isLockerEmpty! ? 'Locker Empty' : 'Locker Occupied',
+          style: TextStyle(
+            color: isLockerEmpty! ? Colors.green : Colors.orange,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildConnectionStatus() {
+    if (connectionError != null) {
+      return Row(
+        children: [
+          const Icon(Icons.wifi_off, color: Colors.red),
+          const SizedBox(width: 8),
+          Expanded(child: Text(connectionError!)),
+        ],
+      );
+    }
+    return Row(
+      children: [
+        const Icon(Icons.wifi, color: Colors.green),
+        const SizedBox(width: 8),
+        const Text('Connected'),
+      ],
+    );
   }
 
   void _markCollected(int index) {
@@ -103,65 +282,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ],
       ),
     );
-  }
-
-  Future<void> fetchLockerStats() async {
-    setState(() {
-      isLoading = true;
-      errorMessage = null;
-    });
-
-    const String piUrl = 'http://10.189.197.16:5000/locker-statistics';
-
-    try {
-      final response = await http.get(Uri.parse(piUrl));
-      print('Raw response: ${response.body}');
-
-      if (response.statusCode == 200) {
-        final lockerData = jsonDecode(response.body);
-
-        // Debug the received data
-        debugPrint('Received data: $lockerData');
-
-        setState(() {
-          temperature = lockerData['temperature']?.toDouble();
-          humidity = lockerData['humidity']?.toDouble();
-          lockerEmptyStatus = lockerData['locker_empty']?.toString();
-
-          // Handle message - check if field exists and has value
-          parcelOverdueMessage = lockerData.containsKey('message')
-              ? lockerData['message']?.toString()
-              : null;
-
-          isLoading = false;
-        });
-
-        // Show snackbar if message exists and isn't null
-        if (parcelOverdueMessage != null && parcelOverdueMessage!.isNotEmpty) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(parcelOverdueMessage!),
-                  backgroundColor: Colors.red,
-                  duration: const Duration(seconds: 5),
-                )
-            );
-          });
-        }
-
-
-      } else {
-        setState(() {
-          errorMessage = 'Failed to load statistics: ${response.statusCode}';
-          isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        errorMessage = 'Error: $e';
-        isLoading = false;
-      });
-    }
   }
 
   Widget buildLockerStatistics() {
@@ -225,15 +345,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 ],
               ),
             ],
-            const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerRight,
-              child: ElevatedButton.icon(
-                icon: const Icon(Icons.refresh),
-                label: const Text('Refresh'),
-                onPressed: fetchLockerStats,
-              ),
-            ),
           ],
         ),
       ),
@@ -425,61 +536,114 @@ class _ParcelInfoScreenState extends State<ParcelInfoScreen> {
   final String lockerLocation = "Row D - Locker 47";
   String status = "Ready for Pickup";
   bool _isPinVisible = false;
+  late WebSocketChannel _pinChannel;
 
   @override
   void initState() {
     super.initState();
+    _connectPinWebSocket();
     _generatePin();
   }
 
-  void _generatePin() async {
-    final random = Random();
-    final newPin = (100000 + random.nextInt(900000)).toString();
+  void _connectPinWebSocket() {
+    const String pinWsUrl = 'ws://10.189.197.163:8765';
 
-    setState(() {
-      _pin = newPin;
-      _isPinVisible = false;
-    });
-
-    await _sendPinToPi(newPin);
-  }
-
-  Future<void> _sendPinToPi(String pin) async {
-    const String raspberryPiIP = 'http://10.189.197.16:5000'; // <-- Replace with your actual Pi IP
-
-    final url = Uri.parse('$raspberryPiIP/set-pin');
+    // Cancel any pending reconnection attempts
+    _reconnectTimer?.cancel();
 
     try {
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'pin': pin}),
+      _pinChannel = WebSocketChannel.connect(Uri.parse(pinWsUrl));
+      _reconnectAttempts = 0; // Reset counter on successful connection
+
+      // Listen for connection state changes
+      _pinChannel.stream.listen(
+            (message) {
+          // Handle incoming messages if needed
+          print('Received: $message');
+        },
+        onError: (error) {
+          print('WebSocket error: $error');
+          _handleDisconnection();
+        },
+        onDone: () {
+          print('WebSocket disconnected');
+          _handleDisconnection();
+        },
+        cancelOnError: true,
       );
 
-      if (response.statusCode == 200) {
-        print('PIN sent successfully: $pin');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('PIN sent to Smart Locker')),
-        );
-      } else {
-        print('Failed to send PIN. Status: ${response.statusCode}');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to send PIN to Pi')),
-        );
-      }
-    } catch (e) {
-      print('Error sending PIN: $e');
+      print('PIN WebSocket connected successfully');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
+        const SnackBar(content: Text('Connected to Smart Locker')),
+      );
+    } catch (e) {
+      print('PIN WebSocket connection error: $e');
+      _handleDisconnection();
+    }
+  }
+
+  void _handleDisconnection() {
+    if (_reconnectAttempts < _maxReconnectAttempts) {
+      _reconnectAttempts++;
+      print('Attempting to reconnect ($_reconnectAttempts/$_maxReconnectAttempts)...');
+
+      _reconnectTimer = Timer(_reconnectDelay, () {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reconnecting... ($_reconnectAttempts/$_maxReconnectAttempts)'),
+            duration: _reconnectDelay,
+          ),
+        );
+        _connectPinWebSocket();
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Connection failed. Please check network and try again.'),
+          duration: Duration(seconds: 5),
+        ),
       );
     }
   }
 
+  Future<void> _sendPinToPi(String pin) async {
+    try {
+      _pinChannel.sink.add(jsonEncode({'pin': pin}));
+      print('PIN sent successfully: $pin');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('PIN sent to Smart Locker')),
+      );
+    } catch (e) {
+      print('Failed to send PIN: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to send PIN: $e')),
+      );
+      // Attempt to reconnect
+      _connectPinWebSocket();
+    }
+  }
+
+  void _generatePin() {
+    final random = Random();
+    final newPin = (100000 + random.nextInt(900000)).toString();
+    setState(() {
+      _pin = newPin;
+      _isPinVisible = false;
+    });
+    _sendPinToPi(newPin);
+  }
 
   void _togglePinVisibility() {
     setState(() {
       _isPinVisible = !_isPinVisible;
     });
+  }
+
+  @override
+  void dispose() {
+    _pinChannel.sink.close();
+    _reconnectTimer?.cancel();
+    super.dispose();
   }
 
   @override
