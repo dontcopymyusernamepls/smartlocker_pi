@@ -10,7 +10,8 @@ id = 'server'
 #port = 1883
 #broker = 'localhost'
 #mqtt_client = mqtt.Client(client_id=id, callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-
+PING_TIMEOUT = 60
+PING_INTERVAL = 30
         
 # MQTT Configuration
 MQTT_BROKER = "localhost"  # PI A's own IP(192.168.158.163)
@@ -36,7 +37,7 @@ def on_mqtt_message(client, userdata, msg):
         for ws in connected_clients:
             asyncio.create_task(ws.send(msg.payload.decode()))
 
-mqtt_client = mqtt.Client(client_id=id, callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+mqtt_client = mqtt.Client(client_id=id)
 mqtt_client.on_connect = on_mqtt_connect
 mqtt_client.on_message = on_mqtt_message
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -44,39 +45,28 @@ mqtt_client.loop_start()
 
 # ========== WebSocket Server ==========
 async def handle_websocket(websocket, path):
-    connected_clients.add(websocket)
-    try:
-        async for message in websocket:
-            data = json.loads(message)
-            if 'pin' in data:  # New PIN from app
-                new_pin = data['pin'].strip()  # Add strip() to remove whitespace
-                if len(new_pin) == 6:
-                    global current_pin
-                    current_pin = new_pin
-                    print(f"Received new PIN from app: {current_pin}")  # Debug log
+	connected_clients.add(websocket)
+	try:
+		websocket.ping_interval = PING_INTERVAL
+		websocket.ping_timeout = PING_TIMEOUT
+		
+		async for message in websocket:
+			data = json.loads(message)
+			if 'pin' in data:  # New PIN from app
+				new_pin = data['pin'].strip()  # Add strip() to remove whitespace
+				if len(new_pin) == 6:
+					global current_pin
+					current_pin = new_pin
+					print(f"Received new PIN from app: {current_pin}")  # Debug log
                     # Broadcast to PI B via MQTT
-                    mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": current_pin}))
-                    await websocket.send(json.dumps({"status": "success", "pin": current_pin}))
-                else:
-                    await websocket.send(json.dumps({"status": "error", "message": "Invalid PIN length"}))
-    finally:
-        connected_clients.remove(websocket)
+					mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": current_pin}))
+					await websocket.send(json.dumps({"status": "success", "pin": current_pin}))
+				else:
+					await websocket.send(json.dumps({"status": "error", "message": "Invalid PIN length"}))
+	finally:
+		connected_clients.remove(websocket)
 
 start_server = websockets.serve(handle_websocket, "0.0.0.0", 8765)
-
-
-def run_mqtt():
-	mqtt_client.connect(broker, port)
-	mqtt_client.subscribe("maintopic/subtopic")
-	mqtt_client.loop_forever()
-	
-def on_message(client, userdata, msg):
-	payload = msg.payload.decode()
-	print(f"Received: {msg.topic} = {payload}")
-	
-	if(msg.topic == 'maintopic/subtopic'):
-		client.publish("dashboard/display", payload)
-		client.publish("log/archive", f"Temp:{payload}")
 	
 # ========== Main ==========
 if __name__ == '__main__':
@@ -84,8 +74,5 @@ if __name__ == '__main__':
 	print("Starting WebSocket server and MQTT broker...")
 	asyncio.get_event_loop().run_until_complete(start_server)
 	asyncio.get_event_loop().run_forever()
-	
-	#mqtt_thread = threading.Thread(target=run_mqtt)
-	#mqtt_thread.start()
-		
 
+		
