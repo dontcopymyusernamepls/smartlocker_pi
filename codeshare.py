@@ -1,17 +1,60 @@
-if input_code.strip() == secretCode:
-    failed_attempts = 0
-    lcd.lcd_clear()
-    lcd.lcd_display_string("Correct!", 1, 4)
-    GPIO.output(Relay, GPIO.LOW)
-    GPIO.output(buzzer, GPIO.HIGH)
-    sleep(0.3)
-    GPIO.output(buzzer, GPIO.LOW)
-    sleep(1)
-    GPIO.output(Relay, GPIO.HIGH)
+import asyncio
+import websockets
+import paho.mqtt.client as mqtt
+import json
 
-    # --- MQTT unlock signal added here ---
+# MQTT Configuration
+MQTT_BROKER = "192.168.158.163"  # PI A's own IP
+MQTT_PORT = 1883
+MQTT_TOPIC_PIN = "locker/pin"
+MQTT_TOPIC_SENSORS = "locker/sensors"
+MQTT_TOPIC_UNLOCK = "locker/unlock"
+
+# Store the current PIN
+current_pin = "111111"
+
+# WebSocket connections
+connected_clients = set()
+
+# ========== MQTT Setup ==========
+def on_mqtt_connect(client, userdata, flags, rc):
+    print(f"MQTT Broker connected with result code {rc}")
+    client.subscribe(MQTT_TOPIC_SENSORS)
+
+def on_mqtt_message(client, userdata, msg):
+    # Forward sensor data to all WebSocket clients
+    if msg.topic == MQTT_TOPIC_SENSORS:
+        for ws in connected_clients:
+            asyncio.create_task(ws.send(msg.payload.decode()))
+
+mqtt_client = mqtt.Client()
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+mqtt_client.loop_start()
+
+# ========== WebSocket Server ==========
+async def handle_websocket(websocket, path):
+    connected_clients.add(websocket)
     try:
-        publish.single("locker/unlock", payload="unlock", hostname="10.189.197.148")
-        print("[MQTT] Unlock signal sent to .148 Pi")
-    except Exception as e:
-        print("[MQTT] Failed to send unlock signal:", e)
+        async for message in websocket:
+            data = json.loads(message)
+            if 'pin' in data:  # New PIN from app
+                new_pin = data['pin']
+                if len(new_pin) == 6:
+                    global current_pin
+                    current_pin = new_pin
+                    # Broadcast to PI B via MQTT
+                    mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": new_pin}))
+                    await websocket.send(json.dumps({"status": "success", "pin": new_pin}))
+                else:
+                    await websocket.send(json.dumps({"status": "error", "message": "Invalid PIN length"}))
+    finally:
+        connected_clients.remove(websocket)
+
+start_server = websockets.serve(handle_websocket, "0.0.0.0", 8765)
+
+# ========== Main ==========
+print("Starting WebSocket server and MQTT broker...")
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
