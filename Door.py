@@ -38,11 +38,15 @@ def on_connect(client, userdata, flags, rc):
 def on_message(client, userdata, msg):
     print(f"Received message on {msg.topic}: {msg.payload.decode()}")
     try:
-        payload = json.loads(msg.payload.decode())
-        if payload.get("action") == "unlock":
+        # Accept both JSON and plain string messages
+        payload = msg.payload.decode()
+        if payload == "unlock" or json.loads(payload).get("action") == "unlock":
+            unlock_locker()
+    except json.JSONDecodeError:
+        if payload == "unlock":
             unlock_locker()
     except Exception as e:
-        print("Error parsing message:", e)
+        print("Error processing message:", e)
 
 # === MQTT Setup ===
 client = mqtt.Client()
@@ -50,4 +54,5 @@ client.on_connect = on_connect
 client.on_message = on_message
 
 client.connect(MQTT_BROKER, MQTT_PORT, 60)
+print("Starting Door MQTT listener...")
 client.loop_forever()
