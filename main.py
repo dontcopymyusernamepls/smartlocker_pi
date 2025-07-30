@@ -5,12 +5,9 @@ import os
 import board
 import adafruit_dht
 import RPi.GPIO as GPIO
-import requests
-from flask import Flask, request, jsonify
+import paho.mqtt.client as mqtt
 import I2C_LCD_driver
 from time import sleep
-import paho.mqtt as mqtt
-import paho.mqtt.publish as publish
 import tempfile
 import shutil
 
@@ -19,6 +16,14 @@ import shutil
 # ===========================================================
 SENSOR_DATA_FILE = '/home/smartlocker/stats/sensor_data.json'
 IR_STATE_FILE = '/home/smartlocker/stats/ir_sensor.json'
+
+# MQTT Configuration
+MQTT_BROKER = "10.189.197.163"  # PI A's IP
+MQTT_PORT = 1883
+MQTT_TOPIC_PIN = "locker/pin"
+MQTT_TOPIC_SENSORS = "locker/sensors"
+MQTT_TOPIC_UNLOCK = "locker/unlock"
+MQTT_TOPIC_IR = "locker/ir"
 
 # GPIO for IR Sensor
 IR_SENSOR_PIN = 23
@@ -36,6 +41,7 @@ input_code = ""
 failed_attempts = 0
 MAX_FAILED_ATTEMPTS = 5
 should_show_prompt = True
+current_pin = "111111"  # Default PIN
 
 lcd = I2C_LCD_driver.lcd()
 lcd.lcd_display_string("System loading", 1, 1)
@@ -55,62 +61,42 @@ GPIO.output(Relay, GPIO.HIGH)
 
 # =================== SAFE WRITING CONFIGS ==========================
 def safe_write_json(data, path):
-	with tempfile.NamedTemporaryFile('w', delete=False) as tmp:
-		json.dump(data, tmp)
-		temp_path = tmp.name
-	shutil.move(temp_path, path)
+    with tempfile.NamedTemporaryFile('w', delete=False) as tmp:
+        json.dump(data, tmp)
+        temp_path = tmp.name
+    shutil.move(temp_path, path)
 
 # ===========================================================
-# ========== FLASK SERVER ===================================
+# ========== MQTT CLIENT ====================================
 # ===========================================================
-app = Flask(__name__)
-shared_data = {'pin': '111111'}
+def on_mqtt_connect(client, userdata, flags, rc):
+    print("Connected to MQTT broker")
+    client.subscribe(MQTT_TOPIC_PIN)
 
-@app.route('/set-pin', methods=['POST'])
-def set_pin():
-    data = request.get_json()
-    new_pin = data.get('pin')
-    if new_pin and len(new_pin) == 6:
-        shared_data['pin'] = new_pin
-        return {'status': 'success', 'pin': new_pin}
-    return {'status': 'error', 'message': 'Invalid pin'}, 400
+def on_mqtt_message(client, userdata, msg):
+    global current_pin
+    if msg.topic == MQTT_TOPIC_PIN:
+        try:
+            data = json.loads(msg.payload)
+            new_pin = data.get("pin", "").strip()  # Ensure we strip whitespace
+            print(f"Received MQTT PIN update: {new_pin} (Current: {current_pin})")  # Debug
+            if len(new_pin) == 6:
+                current_pin = new_pin
+                print(f"Updated PIN to: {current_pin}")
+            else:
+                print(f"Invalid PIN length: {new_pin}")
+        except Exception as e:
+            print(f"Error processing PIN update: {e}")
 
-@app.route('/get-pin', methods=['GET'])
-def get_pin():
-    return {'pin': shared_data['pin']}
-
-@app.route('/locker-statistics', methods=['GET'])
-def locker_statistics():
-    try:
-        # Read DHT data
-        if not os.path.exists(SENSOR_DATA_FILE):
-            return jsonify({"status": "error", "message": "Sensor data not available"}), 404
-        with open(SENSOR_DATA_FILE, 'r') as f:
-            sensor_data = json.load(f)
-
-        # Read IR data
-        locker_empty = "-"
-        if os.path.exists(IR_STATE_FILE):
-            with open(IR_STATE_FILE, 'r') as f_ir:
-                ir_data = json.load(f_ir)
-            locker_empty = ir_data.get("locker_empty", "-")
-            message = ir_data.get("message", None)
-
-        return jsonify({
-            "status": "success",
-            "temperature": sensor_data.get("temperature"),
-            "humidity": sensor_data.get("humidity"),
-            "timestamp": sensor_data.get("timestamp"),
-            "locker_empty": locker_empty,
-            "message": message
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+mqtt_client = mqtt.Client()
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+mqtt_client.loop_start()
 
 # ===========================================================
 # ========== IR SENSOR THREAD ===============================
 # ===========================================================
-
 ALERT_THRESHOLD = 30  # 30 seconds for testing (change to 259200 for 3 days in production)
 parcel_present_since = None
 
@@ -137,12 +123,12 @@ def ir_sensor_loop():
         # Always write both fields
         data = {
             "locker_empty": state_str,
-            "message": message if message else None  # Explicit None instead of empty string
+            "message": message if message else None
         }
         print(f"[DEBUG] Writing IR Data: {data}")
         
         safe_write_json(data, IR_STATE_FILE)
-           
+        mqtt_client.publish(MQTT_TOPIC_IR, json.dumps(data))
         
         last_state = state_str
         time.sleep(0.5)
@@ -162,6 +148,7 @@ def dht_sensor_loop():
                     "timestamp": time.time()
                 }
                 safe_write_json(data, SENSOR_DATA_FILE)
+                mqtt_client.publish(MQTT_TOPIC_SENSORS, json.dumps(data))
                   
                 print(f"[DHT] Temp={temperature:.1f}C Humidity={humidity:.1f}%")
         except Exception as e:
@@ -172,13 +159,7 @@ def dht_sensor_loop():
 # ========== SMARTLOCK KEYPAD ===============================
 # ===========================================================
 def get_secret_code():
-    try:
-        r = requests.get("http://10.189.197.16:5000/get-pin", timeout=2)
-        if r.status_code == 200:
-            return r.json().get("pin", "000000")
-    except Exception as e:
-        print(f"[!] Failed to get code: {e}")
-    return "000000"
+    return current_pin  # Now using the MQTT-updated pin
 
 def setAllCols(state):
     GPIO.output(C1, state)
@@ -187,9 +168,10 @@ def setAllCols(state):
     GPIO.output(C4, state)
 
 def commands():
-    global input_code, relayState, failed_attempts, should_show_prompt
+    global input_code, failed_attempts, should_show_prompt
     secretCode = get_secret_code()
-
+    print(f"Checking PIN: Input='{input_code.strip()}' vs Stored='{secretCode}'")  # Debug
+    
     GPIO.output(C1, GPIO.HIGH)
     if GPIO.input(R2) == 1:  # C key
         input_code = ""
@@ -203,7 +185,7 @@ def commands():
         return True
 
     if GPIO.input(R1) == 1:  # D key
-        if input_code.strip() == secretCode:
+        if input_code.strip() == secretCode.strip():  # Added strip() for comparison
             failed_attempts = 0
             lcd.lcd_clear()
             lcd.lcd_display_string("Correct!", 1, 4)
@@ -213,12 +195,11 @@ def commands():
             GPIO.output(buzzer, GPIO.LOW)
             sleep(1)
             GPIO.output(Relay, GPIO.HIGH)
-            publish.single("locker/unlock", payload="unlock", hostname="10.189.197.148")
+            mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
             print("[MQTT] Unlock signal sent to Door_Pi")
-
-				
         else:
             failed_attempts += 1
+            print(f"Failed attempt {failed_attempts}. Input: '{input_code.strip()}', Expected: '{secretCode.strip()}'")  # Debug
             lcd.lcd_clear()
             lcd.lcd_display_string(f"{MAX_FAILED_ATTEMPTS - failed_attempts} attempts left", 1, 0)
             for _ in range(2):
@@ -268,9 +249,6 @@ if __name__ == '__main__':
         # Start sensor threads
         threading.Thread(target=ir_sensor_loop, daemon=True).start()
         threading.Thread(target=dht_sensor_loop, daemon=True).start()
-
-        # Start Flask server in a thread
-        threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
 
         # Smartlock main loop
         while True:
