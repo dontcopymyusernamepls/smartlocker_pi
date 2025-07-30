@@ -31,23 +31,6 @@ try:
 	servo.mid()
 	sleep(1)
 
-	print("Monitoring if door remains closed for too long...")
-	start_time = time()
-
-	while DOOR_CLOSED:
-		elapsed = time() - start_time
-		if elapsed > MAX_DOOR_CLOSE_TIME:
-			print("ALERT: Door has remained closed too long!")
-			try:
-				response = requests.post(
-					'http://10.189.197.148:5000/door-alert',
-					json={"alert": "Parcel has not been collected for more than 3 days.", "timestamp": time()}
-		        )
-				print("Alert sent to admin dashboard:", response.status_code)
-			except Exception as e:
-				print("Failed to send alert:", e)
-			break
-		sleep
 
 except Exception as e:
 	print(f"Error occurred: {e}")
