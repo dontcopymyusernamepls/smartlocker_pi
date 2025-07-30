@@ -8,32 +8,41 @@ import RPi.GPIO as GPIO
 import paho.mqtt.client as mqtt
 import I2C_LCD_driver
 from time import sleep
+import tempfile
+import shutil
 
-# ========== Configuration ==========
+# ===========================================================
+# ========== GLOBAL CONFIGURATION ===========================
+# ===========================================================
+SENSOR_DATA_FILE = '/home/smartlocker/stats/sensor_data.json'
+IR_STATE_FILE = '/home/smartlocker/stats/ir_sensor.json'
+
+# MQTT Configuration
 MQTT_BROKER = "192.168.158.163"  # PI A's IP
 MQTT_PORT = 1883
-
-# Topics
 MQTT_TOPIC_PIN = "locker/pin"
 MQTT_TOPIC_SENSORS = "locker/sensors"
 MQTT_TOPIC_UNLOCK = "locker/unlock"
 MQTT_TOPIC_IR = "locker/ir"
 
-# GPIO Configuration
+# GPIO for IR Sensor
 IR_SENSOR_PIN = 23
+
+# DHT11 sensor
+dht_device = adafruit_dht.DHT11(board.D4)
+
+# Keypad & Smartlock
 C1, C2, C3, C4 = 5, 6, 13, 19
 R1, R2, R3, R4 = 12, 16, 20, 21
 buzzer = 26
 Relay = 27
-
-# Keypad variables
+relayState = True
 input_code = ""
 failed_attempts = 0
 MAX_FAILED_ATTEMPTS = 5
 should_show_prompt = True
 current_pin = "111111"  # Default PIN
 
-# Initialize LCD
 lcd = I2C_LCD_driver.lcd()
 lcd.lcd_display_string("System loading", 1, 1)
 for i in range(16):
@@ -41,7 +50,6 @@ for i in range(16):
     sleep(0.1)
 lcd.lcd_clear()
 
-# GPIO Setup
 GPIO.setwarnings(False)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup([C1, C2, C3, C4], GPIO.OUT)
@@ -51,7 +59,16 @@ GPIO.setup(Relay, GPIO.OUT)
 GPIO.setup(IR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.output(Relay, GPIO.HIGH)
 
-# ========== MQTT Client ==========
+# =================== SAFE WRITING CONFIGS ==========================
+def safe_write_json(data, path):
+    with tempfile.NamedTemporaryFile('w', delete=False) as tmp:
+        json.dump(data, tmp)
+        temp_path = tmp.name
+    shutil.move(temp_path, path)
+
+# ===========================================================
+# ========== MQTT CLIENT ====================================
+# ===========================================================
 def on_mqtt_connect(client, userdata, flags, rc):
     print("Connected to MQTT broker")
     client.subscribe(MQTT_TOPIC_PIN)
@@ -72,29 +89,15 @@ mqtt_client.on_message = on_mqtt_message
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 mqtt_client.loop_start()
 
-# ========== Sensor Functions ==========
-def publish_sensor_data():
-    dht_device = adafruit_dht.DHT11(board.D4)
-    while True:
-        try:
-            temperature = dht_device.temperature
-            humidity = dht_device.humidity
-            if temperature is not None and humidity is not None:
-                data = {
-                    "temperature": temperature,
-                    "humidity": humidity,
-                    "timestamp": time.time()
-                }
-                mqtt_client.publish(MQTT_TOPIC_SENSORS, json.dumps(data))
-        except Exception as e:
-            print(f"Sensor error: {e}")
-        time.sleep(2)
+# ===========================================================
+# ========== IR SENSOR THREAD ===============================
+# ===========================================================
+ALERT_THRESHOLD = 30  # 30 seconds for testing (change to 259200 for 3 days in production)
+parcel_present_since = None
 
-def publish_ir_data():
-    ALERT_THRESHOLD = 30  # 30 seconds for testing
-    parcel_present_since = None
+def ir_sensor_loop():
+    global parcel_present_since
     last_state = None
-    
     while True:
         current_state = GPIO.input(IR_SENSOR_PIN)
         state_str = "No" if current_state == 0 else "Yes"
@@ -109,19 +112,59 @@ def publish_ir_data():
         message = None
         if (parcel_present_since is not None and 
             (time.time() - parcel_present_since) > ALERT_THRESHOLD):
-            message = "Parcel has not been collected for over threshold time"
+            message = "Parcel has not been collected for over 3 days"
+            print(f"[ALERT] {message}")
         
+        # Always write both fields
         data = {
             "locker_empty": state_str,
-            "message": message
+            "message": message if message else None
         }
+        print(f"[DEBUG] Writing IR Data: {data}")
         
+        safe_write_json(data, IR_STATE_FILE)
         mqtt_client.publish(MQTT_TOPIC_IR, json.dumps(data))
+        
+        last_state = state_str
         time.sleep(0.5)
 
-# ========== Keypad Functions ==========
+# ===========================================================
+# ========== DHT SENSOR THREAD ==============================
+# ===========================================================
+def dht_sensor_loop():
+    while True:
+        try:
+            temperature = dht_device.temperature
+            humidity = dht_device.humidity
+            if temperature is not None and humidity is not None:
+                data = {
+                    "temperature": temperature,
+                    "humidity": humidity,
+                    "timestamp": time.time()
+                }
+                safe_write_json(data, SENSOR_DATA_FILE)
+                mqtt_client.publish(MQTT_TOPIC_SENSORS, json.dumps(data))
+                  
+                print(f"[DHT] Temp={temperature:.1f}C Humidity={humidity:.1f}%")
+        except Exception as e:
+            print("[DHT] Reading failed:", e)
+        time.sleep(2)
+
+# ===========================================================
+# ========== SMARTLOCK KEYPAD ===============================
+# ===========================================================
+def get_secret_code():
+    return current_pin  # Now using the MQTT-updated pin
+
+def setAllCols(state):
+    GPIO.output(C1, state)
+    GPIO.output(C2, state)
+    GPIO.output(C3, state)
+    GPIO.output(C4, state)
+
 def commands():
-    global input_code, failed_attempts, should_show_prompt
+    global input_code, relayState, failed_attempts, should_show_prompt
+    secretCode = get_secret_code()
 
     GPIO.output(C1, GPIO.HIGH)
     if GPIO.input(R2) == 1:  # C key
@@ -136,7 +179,7 @@ def commands():
         return True
 
     if GPIO.input(R1) == 1:  # D key
-        if input_code.strip() == current_pin:
+        if input_code.strip() == secretCode:
             failed_attempts = 0
             lcd.lcd_clear()
             lcd.lcd_display_string("Correct!", 1, 4)
@@ -146,11 +189,9 @@ def commands():
             GPIO.output(buzzer, GPIO.LOW)
             sleep(1)
             GPIO.output(Relay, GPIO.HIGH)
-            
-            # Send unlock command to PI C via MQTT
             mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
             print("[MQTT] Unlock signal sent to Door_Pi")
-                
+
         else:
             failed_attempts += 1
             lcd.lcd_clear()
@@ -194,12 +235,14 @@ def read(column, chars):
                     print(f"[KEYPAD] {input_code}")
     GPIO.output(column, GPIO.LOW)
 
-# ========== Main Execution ==========
+# ===========================================================
+# ========== MAIN EXECUTION =================================
+# ===========================================================
 if __name__ == '__main__':
     try:
         # Start sensor threads
-        threading.Thread(target=publish_sensor_data, daemon=True).start()
-        threading.Thread(target=publish_ir_data, daemon=True).start()
+        threading.Thread(target=ir_sensor_loop, daemon=True).start()
+        threading.Thread(target=dht_sensor_loop, daemon=True).start()
 
         # Smartlock main loop
         while True:
