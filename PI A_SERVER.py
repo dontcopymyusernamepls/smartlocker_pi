@@ -22,6 +22,7 @@ MQTT_PORT = 1883
 MQTT_TOPIC_PIN = "locker/pin"
 MQTT_TOPIC_SENSORS = "locker/sensors"
 MQTT_TOPIC_UNLOCK = "locker/unlock"
+MQTT_TOPIC_DOOR_STATUS = "locker/door_status"  # New topic for door status updates
 
 # Store the current PIN
 current_pin = "111111"
@@ -33,6 +34,7 @@ connected_clients = WeakSet()
 def on_mqtt_connect(client, userdata, flags, rc):
     print(f"MQTT Broker connected with result code {rc}")
     client.subscribe(MQTT_TOPIC_SENSORS)
+    client.subscribe(MQTT_TOPIC_DOOR_STATUS)  # Subscribe to door status updates
 
 def on_mqtt_disconnect(client, userdata, rc):
     print(f"MQTT disconnected with code {rc}")
@@ -47,6 +49,8 @@ def on_mqtt_message(client, userdata, msg):
                 asyncio.create_task(ws.send(payload))
             except:
                 connected_clients.discard(ws)
+    elif msg.topic == MQTT_TOPIC_DOOR_STATUS:
+        print(f"Door status update: {msg.payload.decode()}")
 
 mqtt_client = mqtt.Client(client_id='server')
 mqtt_client.on_connect = on_mqtt_connect
@@ -77,6 +81,15 @@ async def handle_websocket(websocket, path):
                             "status": "error",
                             "message": "Invalid PIN length"
                         }))
+                elif 'command' in data and data['command'] == 'unlock':
+                    # New door unlock command from admin dashboard
+                    print("Sending unlock command to door")
+                    mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
+                    await websocket.send(json.dumps({
+                        "status": "success",
+                        "message": "Unlock command sent"
+                    }))
+                    
             except asyncio.TimeoutError:
                 await websocket.ping()
             except json.JSONDecodeError:
@@ -123,6 +136,7 @@ async def main():
     print(f"- Ping interval: {PING_INTERVAL}s")
     print(f"- Ping timeout: {PING_TIMEOUT}s")
     print(f"- Max message size: 1MB")
+    print(f"- Door control enabled via {MQTT_TOPIC_UNLOCK}")
     
     # Print initial memory stats
     print("\nInitial memory snapshot:")
