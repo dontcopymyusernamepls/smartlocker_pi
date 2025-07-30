@@ -6,6 +6,7 @@ import json
 from weakref import WeakSet
 import resource
 import gc
+import threading
 
 # Initialize memory tracking
 tracemalloc.start()
@@ -42,15 +43,23 @@ def on_mqtt_disconnect(client, userdata, rc):
         client.reconnect()
 
 def on_mqtt_message(client, userdata, msg):
+    payload = msg.payload.decode()
+    
+    # Thread-safe WebSocket send
+    def send_to_ws(ws, payload):
+        try:
+            asyncio.run(ws.send(payload))
+        except Exception as e:
+            print(f"Failed to send to WebSocket: {e}")
+            connected_clients.discard(ws)
+    
     if msg.topic == MQTT_TOPIC_SENSORS:
-        payload = msg.payload.decode()
-        for ws in list(connected_clients):  # Create a copy for thread safety
-            try:
-                asyncio.create_task(ws.send(payload))
-            except:
-                connected_clients.discard(ws)
+        print(f"Forwarding sensor data: {payload}")  # Debug log
+        # Forward to all connected WebSocket clients
+        for ws in list(connected_clients):
+            threading.Thread(target=send_to_ws, args=(ws, payload)).start()
     elif msg.topic == MQTT_TOPIC_DOOR_STATUS:
-        print(f"Door status update: {msg.payload.decode()}")
+        print(f"Door status update: {payload}")
 
 mqtt_client = mqtt.Client(client_id='server')
 mqtt_client.on_connect = on_mqtt_connect
@@ -61,6 +70,7 @@ mqtt_client.loop_start()
 
 # ========== WebSocket Server ==========
 async def handle_websocket(websocket, path):
+    print(f"New WebSocket connection from {websocket.remote_address}")
     connected_clients.add(websocket)
     try:
         while True:
@@ -82,7 +92,6 @@ async def handle_websocket(websocket, path):
                             "message": "Invalid PIN length"
                         }))
                 elif 'command' in data and data['command'] == 'unlock':
-                    # New door unlock command from admin dashboard
                     print("Sending unlock command to door")
                     mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
                     await websocket.send(json.dumps({
@@ -104,6 +113,7 @@ async def handle_websocket(websocket, path):
                 break
     finally:
         connected_clients.discard(websocket)
+        print(f"WebSocket connection closed: {websocket.remote_address}")
         try:
             await websocket.close()
         except:
