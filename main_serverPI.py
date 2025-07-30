@@ -1,20 +1,23 @@
-import paho.mqtt.client as mqtt
-#import firebase_admin
-# firebase_admin import credentials, db
+import tracemalloc
 import asyncio
 import websockets
 import paho.mqtt.client as mqtt
 import json
+from weakref import WeakSet
+import resource
+import gc
 
-id = 'server'
-#port = 1883
-#broker = 'localhost'
-#mqtt_client = mqtt.Client(client_id=id, callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-PING_TIMEOUT = 60
-PING_INTERVAL = 30
-        
+# Initialize memory tracking
+tracemalloc.start()
+resource.setrlimit(resource.RLIMIT_NOFILE, (8192, 8192))
+gc.enable()
+
+# Configuration
+PING_TIMEOUT = 60  # 60 seconds
+PING_INTERVAL = 30  # 30 seconds
+
 # MQTT Configuration
-MQTT_BROKER = "localhost"  # PI A's own IP(192.168.158.163)
+MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
 MQTT_TOPIC_PIN = "locker/pin"
 MQTT_TOPIC_SENSORS = "locker/sensors"
@@ -23,56 +26,121 @@ MQTT_TOPIC_UNLOCK = "locker/unlock"
 # Store the current PIN
 current_pin = "111111"
 
-# WebSocket connections
-connected_clients = set()
+# WebSocket connections (using WeakSet for automatic cleanup)
+connected_clients = WeakSet()
 
 # ========== MQTT Setup ==========
 def on_mqtt_connect(client, userdata, flags, rc):
     print(f"MQTT Broker connected with result code {rc}")
     client.subscribe(MQTT_TOPIC_SENSORS)
 
-def on_mqtt_message(client, userdata, msg):
-    # Forward sensor data to all WebSocket clients
-    if msg.topic == MQTT_TOPIC_SENSORS:
-        for ws in connected_clients:
-            asyncio.create_task(ws.send(msg.payload.decode()))
+def on_mqtt_disconnect(client, userdata, rc):
+    print(f"MQTT disconnected with code {rc}")
+    if rc != 0:
+        client.reconnect()
 
-mqtt_client = mqtt.Client(client_id=id)
+def on_mqtt_message(client, userdata, msg):
+    if msg.topic == MQTT_TOPIC_SENSORS:
+        payload = msg.payload.decode()
+        for ws in list(connected_clients):  # Create a copy for thread safety
+            try:
+                asyncio.create_task(ws.send(payload))
+            except:
+                connected_clients.discard(ws)
+
+mqtt_client = mqtt.Client(client_id='server')
 mqtt_client.on_connect = on_mqtt_connect
 mqtt_client.on_message = on_mqtt_message
+mqtt_client.on_disconnect = on_mqtt_disconnect
 mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 mqtt_client.loop_start()
 
 # ========== WebSocket Server ==========
 async def handle_websocket(websocket, path):
-	connected_clients.add(websocket)
-	try:
-		websocket.ping_interval = PING_INTERVAL
-		websocket.ping_timeout = PING_TIMEOUT
-		
-		async for message in websocket:
-			data = json.loads(message)
-			if 'pin' in data:  # New PIN from app
-				new_pin = data['pin'].strip()  # Add strip() to remove whitespace
-				if len(new_pin) == 6:
-					global current_pin
-					current_pin = new_pin
-					print(f"Received new PIN from app: {current_pin}")  # Debug log
-                    # Broadcast to PI B via MQTT
-					mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": current_pin}))
-					await websocket.send(json.dumps({"status": "success", "pin": current_pin}))
-				else:
-					await websocket.send(json.dumps({"status": "error", "message": "Invalid PIN length"}))
-	finally:
-		connected_clients.remove(websocket)
+    connected_clients.add(websocket)
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(websocket.recv(), timeout=PING_INTERVAL)
+                data = json.loads(message)
+                
+                if 'pin' in data:
+                    new_pin = data['pin'].strip()
+                    if len(new_pin) == 6:
+                        global current_pin
+                        current_pin = new_pin
+                        print(f"PIN updated: {current_pin}")
+                        mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": current_pin}))
+                        await websocket.send(json.dumps({"status": "success", "pin": current_pin}))
+                    else:
+                        await websocket.send(json.dumps({
+                            "status": "error",
+                            "message": "Invalid PIN length"
+                        }))
+            except asyncio.TimeoutError:
+                await websocket.ping()
+            except json.JSONDecodeError:
+                await websocket.send(json.dumps({
+                    "status": "error",
+                    "message": "Invalid JSON format"
+                }))
+            except websockets.exceptions.ConnectionClosed:
+                break
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+                break
+    finally:
+        connected_clients.discard(websocket)
+        try:
+            await websocket.close()
+        except:
+            pass
 
-start_server = websockets.serve(handle_websocket, "0.0.0.0", 8765)
-	
-# ========== Main ==========
+async def memory_monitor():
+    while True:
+        await asyncio.sleep(60)
+        snapshot = tracemalloc.take_snapshot()
+        print("\nMemory stats (top 5):")
+        for stat in snapshot.statistics('lineno')[:5]:
+            print(stat)
+
+async def main():
+    # Start memory monitoring
+    asyncio.create_task(memory_monitor())
+    
+    # Start WebSocket server
+    server = await websockets.serve(
+        handle_websocket,
+        "0.0.0.0",
+        8765,
+        ping_interval=PING_INTERVAL,
+        ping_timeout=PING_TIMEOUT,
+        close_timeout=10,
+        max_size=2**20  # 1MB max message size
+    )
+    
+    print("Server started with:")
+    print(f"- Ping interval: {PING_INTERVAL}s")
+    print(f"- Ping timeout: {PING_TIMEOUT}s")
+    print(f"- Max message size: 1MB")
+    
+    # Print initial memory stats
+    print("\nInitial memory snapshot:")
+    snapshot = tracemalloc.take_snapshot()
+    for stat in snapshot.statistics('lineno')[:3]:
+        print(stat)
+    
+    await server.wait_closed()
+
 if __name__ == '__main__':
-	#mqtt_client.on_message = on_messager
-	print("Starting WebSocket server and MQTT broker...")
-	asyncio.get_event_loop().run_until_complete(start_server)
-	asyncio.get_event_loop().run_forever()
-
-		
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nServer shutting down...")
+    finally:
+        print("Cleaning up...")
+        mqtt_client.disconnect()
+        print("Final memory snapshot:")
+        snapshot = tracemalloc.take_snapshot()
+        for stat in snapshot.statistics('lineno')[:3]:
+            print(stat)
