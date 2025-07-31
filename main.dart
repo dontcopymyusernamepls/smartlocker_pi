@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'dart:async';
+import 'package:camera/camera.dart';
 
 
 Timer? _reconnectTimer;
@@ -77,7 +78,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     });
 
     try {
-      _channel = WebSocketChannel.connect(Uri.parse('ws://10.189.197.163:8765'));
+      _channel = WebSocketChannel.connect(Uri.parse('ws://192.168.158.163:8765'));
 
       _channel.stream.listen(
         _handleWebSocketMessage,
@@ -546,7 +547,7 @@ class _ParcelInfoScreenState extends State<ParcelInfoScreen> {
   }
 
   void _connectPinWebSocket() {
-    const String pinWsUrl = 'ws://10.189.197.163:8765';
+    const String pinWsUrl = 'ws://192.168.158.163:8765';
 
     // Cancel any pending reconnection attempts
     _reconnectTimer?.cancel();
@@ -1081,59 +1082,153 @@ class AboutScreen extends StatelessWidget {
   }
 }
 
-class FacialRecognitionScreen extends StatelessWidget {
+class FacialRecognitionScreen extends StatefulWidget {
   const FacialRecognitionScreen({super.key});
+
+  @override
+  State<FacialRecognitionScreen> createState() => _FacialRecognitionScreenState();
+}
+
+class _FacialRecognitionScreenState extends State<FacialRecognitionScreen> {
+  CameraController? _cameraController;
+  late List<CameraDescription> _cameras;
+  bool _isProcessing = false;
+  String _statusMessage = 'Point camera to your face and tap "Scan & Unlock"';
+
+  late WebSocketChannel _faceChannel;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+    _connectFaceWebSocket();  // Connect WS on init
+  }
+
+  Future<void> _initCamera() async {
+    _cameras = await availableCameras();
+    _cameraController = CameraController(_cameras[1], ResolutionPreset.medium);
+    await _cameraController!.initialize();
+    if (mounted) setState(() {});
+  }
+
+  void _connectFaceWebSocket() {
+    const String faceWsUrl = 'ws://192.168.158.163:8765';
+    _faceChannel = WebSocketChannel.connect(Uri.parse(faceWsUrl));
+
+    _faceChannel.stream.listen(
+      _handleFaceWebSocketMessage,
+      onError: _handleFaceWebSocketError,
+      onDone: _handleFaceWebSocketDisconnect,
+    );
+  }
+
+  void _handleFaceWebSocketMessage(dynamic message) {
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded['type'] == 'face_auth_response') {
+        setState(() {
+          _statusMessage = decoded['success']
+              ? 'Face recognized. Locker unlocked!'
+              : 'Face not recognized or unauthorized.';
+          _isProcessing = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'Invalid response from server.';
+        _isProcessing = false;
+      });
+    }
+  }
+
+  void _handleFaceWebSocketError(error) {
+    setState(() {
+      _statusMessage = 'WebSocket error: $error';
+      _isProcessing = false;
+    });
+  }
+
+  void _handleFaceWebSocketDisconnect() {
+    setState(() {
+      _statusMessage = 'WebSocket connection closed.';
+      _isProcessing = false;
+    });
+  }
+
+  Future<void> _captureAndSendImage() async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+
+    setState(() {
+      _isProcessing = true;
+      _statusMessage = 'Scanning...';
+    });
+
+    try {
+      final XFile photo = await _cameraController!.takePicture();
+      final bytes = await photo.readAsBytes();
+      final base64Image = base64Encode(bytes);
+
+      final payload = jsonEncode({
+        "type": "face_auth",
+        "image": base64Image,
+      });
+
+      _faceChannel.sink.add(payload);
+      // Wait for server response in _handleFaceWebSocketMessage
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'Error: ${e.toString()}';
+        _isProcessing = false;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    _faceChannel.sink.close();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Facial Recognition'),
-      ),
-      drawer: const AppDrawer(),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.face_retouching_natural, size: 100, color: Colors.deepPurple),
-              const SizedBox(height: 30),
-              const Text(
-                'Facial Recognition Coming Soon!',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'This feature will let you authenticate securely using face detection.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 40),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.home),
-                  label: const Text('Back to Home'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    backgroundColor: const Color(0xFF6C56F5),
-                    foregroundColor: Colors.white,
-                  ),
-                ),
-              ),
-            ],
+      appBar: AppBar(title: const Text('Facial Recognition')),
+      body: Column(
+        children: [
+          if (_cameraController != null && _cameraController!.value.isInitialized)
+            AspectRatio(
+              aspectRatio: _cameraController!.value.aspectRatio,
+              child: CameraPreview(_cameraController!),
+            )
+          else
+            const Center(child: CircularProgressIndicator()),
+          const SizedBox(height: 20),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              _statusMessage,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
+            ),
           ),
-        ),
+          if (!_isProcessing)
+            ElevatedButton.icon(
+              onPressed: _captureAndSendImage,
+              icon: const Icon(Icons.lock_open),
+              label: const Text('Scan & Unlock'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 32),
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+              ),
+            ),
+        ],
       ),
     );
   }
 }
+
 
 class AppDrawer extends StatelessWidget {
   const AppDrawer({super.key});
