@@ -5,6 +5,21 @@ SERVO_PIN = 17  # Change this to your actual GPIO pin
 factory = PiGPIOFactory()
 servo = Servo(SERVO_PIN, pin_factory=factory)
 FAN_THRESHOLD = 28  # Temperature threshold in Celsius
+
+
+
+servo_pwm = GPIO.PWM(SERVO_PIN, 50)
+servo_pwm.start(0)
+
+# Add the oscillation function
+def oscillate_servo():
+    for _ in range(5):
+        servo_pwm.ChangeDutyCycle(7.5)  # 90°
+        time.sleep(0.15)
+        servo_pwm.ChangeDutyCycle(2.5)  # -90°
+        time.sleep(0.15)
+    servo_pwm.ChangeDutyCycle(0)  # Stop
+
 def dht_sensor_loop():
     while True:
         try:
@@ -21,18 +36,18 @@ def dht_sensor_loop():
                 
                 print(f"[DHT] Temp={temperature:.1f}C Humidity={humidity:.1f}%")
                 
-                # Control servo based on temperature
+                # Servo control logic
                 if temperature > FAN_THRESHOLD:
-                    servo.max()  # Spin the servo (simulate fan on)
-                    print("[FAN] Temperature high - activating servo (fan)")
+                    print("[FAN] Temperature high - activating servo")
+                    oscillate_servo()  # Call the oscillation function
                 else:
-                    servo.min()  # Stop the servo (simulate fan off)
-                    print("[FAN] Temperature normal - deactivating servo (fan)")
+                    servo_pwm.ChangeDutyCycle(0)  # Stop servo
                     
         except Exception as e:
             print("[DHT] Reading failed:", e)
         time.sleep(2)
 
-  finally:
-    servo.close()  # Properly cleanup servo resources
+
+finally:
+    servo_pwm.stop()
     GPIO.cleanup()
