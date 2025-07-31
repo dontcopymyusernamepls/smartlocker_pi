@@ -22,7 +22,7 @@ except Exception as e:
     raise
 
 # === MQTT Config ===
-MQTT_BROKER = "10.189.197.163"  # IP of Pi A (MQTT broker)
+MQTT_BROKER = "192.168.158.163"  # IP of Pi A (MQTT broker)
 MQTT_PORT = 1883
 MQTT_TOPIC_UNLOCK = "locker/unlock"
 MQTT_TOPIC_STATUS = "locker/door_status"
