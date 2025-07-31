@@ -10,6 +10,8 @@ import I2C_LCD_driver
 from time import sleep
 import tempfile
 import shutil
+from gpiozero import Servo
+from gpiozero.pins.pigpio import PiGPIOFactory
 
 # ===========================================================
 # ========== GLOBAL CONFIGURATION ===========================
@@ -18,7 +20,7 @@ SENSOR_DATA_FILE = '/home/smartlocker/stats/sensor_data.json'
 IR_STATE_FILE = '/home/smartlocker/stats/ir_sensor.json'
 
 # MQTT Configuration
-MQTT_BROKER = "10.189.197.163"  # PI A's IP
+MQTT_BROKER = "192.168.158.163"  # PI A's IP
 MQTT_PORT = 1883
 MQTT_TOPIC_PIN = "locker/pin"
 MQTT_TOPIC_SENSORS = "locker/sensors"
@@ -30,6 +32,15 @@ IR_SENSOR_PIN = 23
 
 # DHT11 sensor
 dht_device = adafruit_dht.DHT11(board.D4)
+
+# Servo Motor (Fan simulation)
+SERVO_PIN = 17 
+factory = PiGPIOFactory()
+servo = Servo(SERVO_PIN, pin_factory=factory)
+GPIO.setup(SERVO_PIN, GPIO.OUT)
+servo_pwm = GPIO.PWM(SERVO_PIN, 50)
+servo_pwm.start(0)
+FAN_THRESHOLD = 28  # Temperature threshold in Celsius
 
 # Keypad & Smartlock
 C1, C2, C3, C4 = 5, 6, 13, 19
@@ -136,6 +147,14 @@ def ir_sensor_loop():
 # ===========================================================
 # ========== DHT SENSOR THREAD ==============================
 # ===========================================================
+def oscillate_servo():
+    for _ in range(5):
+        servo.max() #90
+        time.sleep(0.15)
+        servo.min() #90
+        time.sleep(0.15)
+    servo.detach()  # Stop
+    
 def dht_sensor_loop():
     while True:
         try:
@@ -149,8 +168,18 @@ def dht_sensor_loop():
                 }
                 safe_write_json(data, SENSOR_DATA_FILE)
                 mqtt_client.publish(MQTT_TOPIC_SENSORS, json.dumps(data))
-                  
                 print(f"[DHT] Temp={temperature:.1f}C Humidity={humidity:.1f}%")
+                
+                # Control servo based on temperature
+                if temperature > 23:
+                    print("[FAN] Temperature high - activating servo")
+                    oscillate_servo()  # Call the oscillation function
+                else:
+                    servo.detach()  # Stop servo
+                    time.sleep(0.1)
+                    
+                  
+                
         except Exception as e:
             print("[DHT] Reading failed:", e)
         time.sleep(2)
@@ -268,4 +297,5 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("[!] Stopped.")
     finally:
+        servo_pwm.stop()
         GPIO.cleanup()
