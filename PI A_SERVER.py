@@ -23,7 +23,8 @@ MQTT_PORT = 1883
 MQTT_TOPIC_PIN = "locker/pin"
 MQTT_TOPIC_SENSORS = "locker/sensors"
 MQTT_TOPIC_UNLOCK = "locker/unlock"
-MQTT_TOPIC_DOOR_STATUS = "locker/door_status"  # New topic for door status updates
+MQTT_TOPIC_DOOR_STATUS = "locker/door_status"
+MQTT_TOPIC_IR = "locker/ir"  # Added IR sensor topic
 
 # Store the current PIN
 current_pin = "111111"
@@ -35,7 +36,8 @@ connected_clients = WeakSet()
 def on_mqtt_connect(client, userdata, flags, rc):
     print(f"MQTT Broker connected with result code {rc}")
     client.subscribe(MQTT_TOPIC_SENSORS)
-    client.subscribe(MQTT_TOPIC_DOOR_STATUS)  # Subscribe to door status updates
+    client.subscribe(MQTT_TOPIC_DOOR_STATUS)
+    client.subscribe(MQTT_TOPIC_IR)  # Subscribe to IR sensor topic
 
 def on_mqtt_disconnect(client, userdata, rc):
     print(f"MQTT disconnected with code {rc}")
@@ -43,23 +45,51 @@ def on_mqtt_disconnect(client, userdata, rc):
         client.reconnect()
 
 def on_mqtt_message(client, userdata, msg):
-    payload = msg.payload.decode()
-    
-    # Thread-safe WebSocket send
-    def send_to_ws(ws, payload):
-        try:
-            asyncio.run(ws.send(payload))
-        except Exception as e:
-            print(f"Failed to send to WebSocket: {e}")
-            connected_clients.discard(ws)
-    
-    if msg.topic == MQTT_TOPIC_SENSORS:
-        print(f"Forwarding sensor data: {payload}")  # Debug log
-        # Forward to all connected WebSocket clients
-        for ws in list(connected_clients):
-            threading.Thread(target=send_to_ws, args=(ws, payload)).start()
-    elif msg.topic == MQTT_TOPIC_DOOR_STATUS:
-        print(f"Door status update: {payload}")
+    try:
+        payload = msg.payload.decode()
+        data = json.loads(payload)
+        
+        # Prepare WebSocket message
+        ws_message = {}
+        
+        if msg.topic == MQTT_TOPIC_SENSORS:
+            print(f"Forwarding sensor data: {data}")
+            ws_message.update({
+                'temperature': data.get('temperature'),
+                'humidity': data.get('humidity'),
+                'timestamp': data.get('timestamp')
+            })
+        elif msg.topic == MQTT_TOPIC_IR:
+            print(f"Forwarding IR sensor data: {data}")
+            ws_message.update({
+                'locker_empty': data.get('locker_empty'),
+                'message': data.get('message')
+            })
+        elif msg.topic == MQTT_TOPIC_DOOR_STATUS:
+            print(f"Door status update: {data}")
+            ws_message.update({
+                'door_status': data.get('status')
+            })
+        
+        # Send through WebSocket if we have data
+        if ws_message:
+            print(f"Sending to WebSocket: {ws_message}")
+            for ws in list(connected_clients):
+                try:
+                    # Thread-safe WebSocket send
+                    def send_to_ws(ws, message):
+                        try:
+                            asyncio.run(ws.send(json.dumps(message)))
+                        except Exception as e:
+                            print(f"Failed to send to WebSocket: {e}")
+                            connected_clients.discard(ws)
+                    
+                    threading.Thread(target=send_to_ws, args=(ws, ws_message)).start()
+                except Exception as e:
+                    print(f"Error preparing WebSocket message: {e}")
+                    
+    except Exception as e:
+        print(f"Error processing MQTT message: {e}")
 
 mqtt_client = mqtt.Client(client_id='server')
 mqtt_client.on_connect = on_mqtt_connect
@@ -85,18 +115,33 @@ async def handle_websocket(websocket, path):
                         current_pin = new_pin
                         print(f"PIN updated: {current_pin}")
                         mqtt_client.publish(MQTT_TOPIC_PIN, json.dumps({"pin": current_pin}))
-                        await websocket.send(json.dumps({"status": "success", "pin": current_pin}))
+                        await websocket.send(json.dumps({
+                            "status": "success", 
+                            "pin": current_pin,
+                            "message": "PIN updated successfully"
+                        }))
                     else:
                         await websocket.send(json.dumps({
                             "status": "error",
-                            "message": "Invalid PIN length"
+                            "message": "Invalid PIN length (must be 6 digits)"
                         }))
-                elif 'command' in data and data['command'] == 'unlock':
-                    print("Sending unlock command to door")
-                    mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
+                elif 'command' in data:
+                    if data['command'] == 'unlock':
+                        print("Sending unlock command to door")
+                        mqtt_client.publish(MQTT_TOPIC_UNLOCK, "unlock")
+                        await websocket.send(json.dumps({
+                            "status": "success",
+                            "message": "Unlock command sent"
+                        }))
+                    else:
+                        await websocket.send(json.dumps({
+                            "status": "error",
+                            "message": "Unknown command"
+                        }))
+                else:
                     await websocket.send(json.dumps({
-                        "status": "success",
-                        "message": "Unlock command sent"
+                        "status": "error",
+                        "message": "Invalid request format"
                     }))
                     
             except asyncio.TimeoutError:
@@ -146,7 +191,11 @@ async def main():
     print(f"- Ping interval: {PING_INTERVAL}s")
     print(f"- Ping timeout: {PING_TIMEOUT}s")
     print(f"- Max message size: 1MB")
-    print(f"- Door control enabled via {MQTT_TOPIC_UNLOCK}")
+    print(f"- Supported MQTT topics:")
+    print(f"  - {MQTT_TOPIC_SENSORS} (temperature/humidity)")
+    print(f"  - {MQTT_TOPIC_IR} (locker empty status)")
+    print(f"  - {MQTT_TOPIC_DOOR_STATUS} (door status)")
+    print(f"  - {MQTT_TOPIC_UNLOCK} (unlock commands)")
     
     # Print initial memory stats
     print("\nInitial memory snapshot:")
